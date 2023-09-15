@@ -14,7 +14,7 @@ namespace serverapiorg
         {
             GlobalConfiguration.Configure(WebApiConfig.Register);
             WSServer server = new WSServer();
-            await server.Start("https://127.0.0.1:7980/");
+            await server.Start("http://127.0.0.1:7980/");
         }
     }
 }

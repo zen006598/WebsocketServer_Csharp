@@ -12,6 +12,8 @@ using serverapiorg.Models;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Net.Sockets;
+using System.Web.Services.Description;
+using System.Runtime.CompilerServices;
 
 namespace serverapiorg.Models
 {
@@ -32,7 +34,7 @@ namespace serverapiorg.Models
 
             while (!_cancellationTokenSource.Token.IsCancellationRequested)
             {
-                var context = await _listener.GetContextAsync();
+                var context = await _listener.GetContextAsync().ConfigureAwait(false);
                 if (context.Request.IsWebSocketRequest)
                 {
                     string user = context.Request.QueryString["user"];
@@ -42,7 +44,8 @@ namespace serverapiorg.Models
                         context.Response.Close();
                         return;
                     }
-                    await HandleWebSocketSession(user, await context.AcceptWebSocketAsync(null));
+
+                    _ = HandleWebSocketSession(user, await context.AcceptWebSocketAsync(null));
                 }
                 else {
                     context.Response.StatusCode = 400;
@@ -59,18 +62,21 @@ namespace serverapiorg.Models
             _listener = null;
         }
 
-        private async Task HandleWebSocketSession(string user, HttpListenerWebSocketContext context) 
-        { 
+        private async Task HandleWebSocketSession(string user, HttpListenerWebSocketContext context)
+        {
             var socket = context.WebSocket;
             ArraySegment<byte> buffer = CreateBuffer();
 
-            if (!Users.TryAdd(user, socket)) 
+            if (!Users.TryAdd(user, socket))
             {
                 await SendMessageAsync(socket, "You are already connecting...");
                 return;
             }
 
-            try {
+            await SendMessageAsync(socket, "You have successfully connected!");
+
+            try
+            {
                 while (socket.State == WebSocketState.Open)
                 {
                     var receiveResult = await socket.ReceiveAsync(buffer, CancellationToken.None);
@@ -81,15 +87,28 @@ namespace serverapiorg.Models
                         return;
                     }
 
-                    WebSocket connectingUser = Users[user];
-                    await SendMessageAsync(socket, "You have successfully connected!");
+                    string encodeBuffer = Encoding.UTF8.GetString(buffer.Array, 0, receiveResult.Count);
+                    WSMsgInfo wsMsgInfo = JsonConvert.DeserializeObject<WSMsgInfo>(encodeBuffer);
+
+                    switch (wsMsgInfo._Type.ToString())
+                    {
+                        case "Broadcast":
+                            await BroadcastMessage(wsMsgInfo);
+                            break;
+                        case "_Private":
+                            await SendPrivateMessage(wsMsgInfo);
+                            break;
+                    }
                 }
-            } catch(Exception error) {
+            }
+            catch (Exception error)
+            {
                 throw new InvalidOperationException(error.ToString());
             }
         }
 
-        private void IsItServerRuning() {
+        private void IsItServerRuning() 
+        {
             if (_listener != null && _listener.IsListening) 
             {
                 throw new InvalidOperationException("Server is runing...");
@@ -110,7 +129,12 @@ namespace serverapiorg.Models
         {
             byte[] buffer = Encoding.UTF8.GetBytes(message);
             var segment = new ArraySegment<byte>(buffer);
-            await socket.SendAsync(segment, WebSocketMessageType.Text, true, CancellationToken.None);
+            try {
+                await socket.SendAsync(segment, WebSocketMessageType.Text, true, CancellationToken.None);
+            }catch(Exception error) 
+            {
+                throw new InvalidOperationException(error.ToString());
+            }
         }
 
         private async Task CloseWebsocketConnection(WebSocket socket, string user) 
@@ -120,13 +144,39 @@ namespace serverapiorg.Models
             Users.TryRemove(user, out _);
         }
 
-        private async Task CloseAllWebsocketConnectionAsync() {
+        private async Task CloseAllWebsocketConnectionAsync() 
+        {
             foreach (var user in Users) {
                 if (user.Value.State == WebSocketState.Open) 
                 {
                     await user.Value.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server is shutting down.", CancellationToken.None);
                 }
-                Users.Clear();
+            }
+            Users.Clear();
+        }
+
+        private async Task BroadcastMessage(WSMsgInfo messageInfo) 
+        {
+            foreach (var user in Users.Keys) 
+            {
+                if (user != messageInfo.Sender) 
+                {
+                    await SendMessageAsync(Users[user], messageInfo.Content);
+                }
+            }
+        }
+
+        private async Task SendPrivateMessage(WSMsgInfo messageInfo)
+        {
+            WebSocket socket;
+            if (Users.TryGetValue(messageInfo.Reciever, out  socket))
+            {
+                await SendMessageAsync(socket, messageInfo.Content);
+            }
+            else 
+            {
+                Users.TryGetValue(messageInfo.Sender, out  socket);
+                await SendMessageAsync(socket, "the user is not exist.");
             }
         }
     }
